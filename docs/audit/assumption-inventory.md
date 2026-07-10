@@ -8,18 +8,32 @@ Step 0 gate is BLOCKED (no `GROOVE_API_TOKEN`, `api.groovehq.com` egress
 denied 403 by network policy). Schema is **not** inferred from source; this
 only records what the code *expects*.
 
-## Architectural context (why this matters)
+## HEADLINE — this is a REST v1 → GraphQL migration, not a GraphQL bug-fix
 
 The conversation-read core does **not** run on GraphQL today. `index.ts`
 wires `listConversations`, `getConversation`, and `listMessages` to
-`ConversationTools`, which calls the **REST v1** `GrooveRestClient` and then
-runs `convertTicketToConversation` to fake GraphQL-shaped objects. The
-GraphQL queries `queries.listConversations` / `queries.getConversation` are
-pre-written but **dead code**. Likewise `MessageTools.listMessages`
-(GraphQL) is dead — the wired `listMessages` is the REST one on
-`ConversationTools`. So every assumption below marked *(unused)* has **never
-executed against the live API** and is exactly what the gate must confirm
-before the rewire.
+`ConversationTools`, which calls the **REST v1** `GrooveRestClient`
+(`https://api.groovehq.com/v1`, `access_token` query param) and then runs
+`convertTicketToConversation` to fake GraphQL-shaped objects. The entire
+`queries.*` GraphQL layer is **dead code**:
+
+- `queries.listConversations` / `queries.getConversation` — pre-written, never called.
+- `MessageTools.listMessages` (GraphQL, `messages.ts:25`) — never called; the
+  wired `listMessages` is the **REST** one on `ConversationTools`
+  (`conversations.ts:160`).
+
+**Consequence for this engagement:** the path currently serving results is
+**Groove REST v1, which is no longer in active development** (deprecated). So
+the deliverable is a **migration plan off deprecated REST v1 onto GraphQL**,
+not a list of GraphQL query bugs. Every assumption below marked *(unused /
+latent)* has **never executed against the live API** — it is *latent*, not
+*live*. That reframes how the gate result is read:
+
+> **A schema-clean PASS does not mean the tool works.** PASS only confirms the
+> GraphQL schema matches the assumptions in this inventory. The code is still
+> unwired — it keeps calling deprecated REST v1 until the migration
+> (`rest-client.ts` deletion + `queries.*` wiring + ID unification) is done.
+> PASS is the *green light to migrate*, not evidence of a working GraphQL path.
 
 ---
 
@@ -52,6 +66,19 @@ before the rewire.
 - **Assumes:** root field `messages(conversationId: ID!, first, after)` and that the `ID` equals the `node.id` returned by `conversations`/`conversation`.
 - **Current reality (the break):** the REST path fabricates `id: cnv_<ticketId>` (`conversations.ts:44`) which is **not** a GraphQL node id, then strips `cnv_` again to hit REST (`conversations.ts:162`). GraphQL-id drilling never happens.
 - **Failure if wrong:** If `messages` uses a different arg name, or the conversation id is not accepted by `messages`, conversation→messages drilling stays broken after the rewire. **This is the single most important thing the gate confirms.**
+
+### A6. Result shape — Cursor Connection vs REST array, and cursor vs `per_page` pagination
+- **File / symbol (REST-era assumptions, live today):**
+  - `rest-client.ts:53-57` `listTickets` — pages with `per_page=${limit}` and returns a bare **array** (`response.tickets`).
+  - `rest-client.ts:59-62` `getTicketMessages` — returns a bare **array** (`response.messages`).
+  - `conversations.ts:90-112` `listConversations` — returns `Conversation[]`, filters client-side, caps with `limit`; **no cursor**, single page.
+  - `conversations.ts:160-171` `listMessages` — array + `messages.slice(0, limit)`; **no cursor**.
+  - `index.ts` `listConversations` inputSchema — exposes only `limit`, **no `after`** cursor (contrast `listMessages`/`listContacts`, which already thread `after`).
+- **Assumes (GraphQL target, per Cursor Connections spec):** `conversations` (and `contacts`, `messages`) return a **`*Connection`** with `{ edges { node } / nodes, pageInfo { hasNextPage, endCursor } }` and paginate via `first` / `after` cursors — **not** arrays, **not** `page` / `per_page`. The pre-written `queries.*` already assume this connection shape (`graphql-queries.ts:175-184`), but the wired REST code assumes arrays.
+- **Failure if wrong:** two directions —
+  - If GraphQL returns a Connection (expected) but code keeps REST-array handling, `response.conversations.edges` is `undefined` → runtime crash on migration.
+  - The bigger AP-research failure: the REST-era `limit`/single-page model **cannot sweep the account**. Vendor lookup and channel overview require looping `first`/`after` until `pageInfo.hasNextPage` is false; a one-page result silently under-reports (looks complete, isn't). Any migration that ports `limit` → `first` without a cursor loop reproduces the "one page only" defect on GraphQL.
+- **Gate mapping:** the gate reports each root field's **return type** (is it a `*Connection`?) and whether that type exposes `edges`/`nodes`/`pageInfo`, and whether `first`/`after` args exist — 1:1, same as every other row.
 
 ---
 
@@ -119,4 +146,19 @@ B2–B4 (root-field args), and A2–A4/B-filter fields. It does **not** validate
 
 `scripts/introspection-gate.sh` therefore runs the task's exact query **plus**
 targeted `__type` lookups for `Conversation`, `Message`, `ConversationOrder`,
-`Contact`, and `Channel`, so PASS/FAIL maps 1:1 to this inventory.
+`Contact`, and `Channel`, plus each root field's **return type** (A6
+connection shape), so PASS/FAIL maps 1:1 to this inventory.
+
+## Post-gate caveat — introspection PASS ≠ read authorization (separate check)
+
+`__schema`/`__type` introspection succeeds with **almost any syntactically
+valid token**, regardless of that token's data scopes. So a gate PASS confirms
+only that the live **schema** matches this inventory — **not** that the token
+can actually read conversations, contacts, or messages. Read authorization is
+a **distinct check**: a single real `conversations(first: 1) { edges { node {
+id } } }` (and one `contacts(first: 1)`) query, run **once the env is
+unblocked**, confirms the token's scopes return data rather than an
+authorization error. This is deliberately **not** run by the introspection
+gate; it belongs to the smoke test (Step 6) and to the "is my token read-only
+scoped?" question (Step 7). Treat a schema PASS with an unknown-scope token as
+*schema-verified, read-unverified*.

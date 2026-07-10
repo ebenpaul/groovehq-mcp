@@ -30,6 +30,7 @@ query GateIntrospection {
       fields {
         name
         description
+        type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
         args { name type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }
       }
     }
@@ -56,6 +57,18 @@ query GateIntrospection {
     fields { name }
   }
   Channel: __type(name: "Channel") {
+    fields { name }
+  }
+  # A6 — likely Connection type names; if present, confirms edges/nodes/pageInfo
+  # (cursor-connection shape). If null, read the real return type off the
+  # root-field dump above and adjust.
+  ConversationConnection: __type(name: "ConversationConnection") {
+    fields { name }
+  }
+  ContactConnection: __type(name: "ContactConnection") {
+    fields { name }
+  }
+  MessageConnection: __type(name: "MessageConnection") {
     fields { name }
   }
 }
@@ -105,4 +118,34 @@ echo "=== Conversation type present + field count (C1) ==="
 jq -r 'if .data.Conversation == null then "  ABSENT" else "  present, \(.data.Conversation.fields | length) fields" end' "$OUT" || true
 
 echo
+echo "=== A6: result shape — return type + cursor pagination for conversations/contacts/messages ==="
+for f in conversations contacts messages; do
+  # return type name (unwrap NON_NULL/LIST) and whether first/after args exist
+  rt=$(jq -r --arg f "$f" '.data.__schema.queryType.fields[] | select(.name==$f) | .type | (.name // .ofType.name // .ofType.ofType.name // "?")' "$OUT")
+  hasfirst=$(jq -r --arg f "$f" '[.data.__schema.queryType.fields[] | select(.name==$f) | .args[].name] | (index("first")!=null)' "$OUT")
+  hasafter=$(jq -r --arg f "$f" '[.data.__schema.queryType.fields[] | select(.name==$f) | .args[].name] | (index("after")!=null)' "$OUT")
+  echo "  $f -> returns: $rt   | first: $hasfirst  after: $hasafter"
+done
+echo "  (a *Connection return type + first/after args = cursor-connection, NOT array/per_page)"
+echo "  ConversationConnection fields: $(jq -rc '.data.ConversationConnection.fields // "ABSENT" | if type=="array" then map(.name) else . end' "$OUT")"
+
+echo
 echo "Review $OUT and judge PASS/FAIL per docs/audit/assumption-inventory.md."
+echo "NOTE: introspection PASS confirms SCHEMA only, not token read scope."
+echo "      For read authorization, run:  $0 --read-check   (separate, post-gate)."
+
+# ---- SEPARATE post-gate check: read authorization (NOT part of the gate) ----
+# Introspection succeeds with almost any valid token regardless of data scopes.
+# This opt-in step issues ONE real read to confirm the token can actually see
+# conversations/contacts. Run only after a schema PASS, once egress is unblocked.
+if [ "${1:-}" = "--read-check" ]; then
+  echo
+  echo "=== READ-AUTH CHECK (separate from gate) — conversations(first:1) & contacts(first:1) ==="
+  RQ='query ReadAuth { conversations(first: 1) { edges { node { id } } } contacts(first: 1) { edges { node { id } } } }'
+  curl -sS -X POST "$ENDPOINT" \
+    -H "Authorization: Bearer $GROOVE_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data "$(jq -n --arg q "$RQ" '{query:$q}')" \
+  | jq '{errors: (.errors // "none"), conversations: (.data.conversations.edges | length? // "n/a"), contacts: (.data.contacts.edges | length? // "n/a")}'
+  echo "  errors=none with counts present => token has read scope. Any authorization error => scope gap (schema PASS still stands)."
+fi
