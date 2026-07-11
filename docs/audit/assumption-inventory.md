@@ -1,12 +1,41 @@
 # GraphQL Schema Assumption Inventory (pre-gate)
 
-Baseline: unmodified fork of `christiangenco/groove-mcp`.
+Baseline: unmodified fork of `christiangenco/groove-mcp` @ upstream HEAD
+`1894a1fc060cac17c75a30ff7949ca4cffe305f5` ("Add channels and REST client
+functionality", 2025-07-01). Fork `src/` is byte-identical to upstream HEAD
+(tree `c6c76a45…`), and that SHA is still upstream `main`/HEAD — no divergence.
 Purpose: enumerate every place the code assumes a shape for the Groove v2
 GraphQL schema, so the Step 0 introspection result can be checked 1:1 against
-real assumptions **before** any rewrite. Nothing here is validated yet — the
-Step 0 gate is BLOCKED (no `GROOVE_API_TOKEN`, `api.groovehq.com` egress
-denied 403 by network policy). Schema is **not** inferred from source; this
-only records what the code *expects*.
+real assumptions **before** any rewrite. Schema is **not** inferred from
+source; this only records what the code *expects*.
+
+## GATE STATUS: BLOCKED-ON-SCOPE (gate ran live 2026-07 with a real admin token)
+
+The env block is cleared and the introspection **ran live**. Result: the
+token's schema **does not expose the conversations surface at all** — this is
+an authorization-scoping block, not FAIL and not env.
+
+- Root query fields returned (token-visible): `accountPreferences`,
+  `aiConversationSuggestions`, `billing`, `companies`, `contacts`,
+  `customFields`/`customFieldCategories`, `drafts`, `emailMarketing*`,
+  `exports`, `eventGroups`, `integrations`, `node`, `nodes`, `ping`, `wallets`,
+  `webhook(s)`, `widgets`, … — **no `conversations`, no `conversation(id:)`, no
+  `messages`.**
+- `__type(name:"ConversationFilter")` → **`null`**. `Conversation`, `Message`,
+  `ConversationConnection`, `Mailbox` types **do not exist** in the schema this
+  token sees. A full conversation/message/ticket/mailbox type sweep returned
+  only peripheral types (`AiConversationSuggestionType`, `ChannelIntegration`,
+  `WidgetChannelType`, `Folder*`).
+- **Token is valid and reads live data:** `contacts(first:1){edges{node{id}}}`
+  returned a real node (`co_7477923393`). Groove filters the introspected
+  schema to the token's authorization, so the *types* vanish, not just the
+  fields.
+
+**Therefore A2–A5 and B1–B2 are UNANSWERABLE until a help-desk-scoped token is
+obtained** (being pursued with Groove separately). Groove v2 *does* expose
+conversations/messages per Groove's docs and upstream's README — this token
+simply isn't scoped for it. Do not synthesize that schema; it genuinely is not
+present for this credential.
 
 ## HEADLINE — this is a REST v1 → GraphQL migration, not a GraphQL bug-fix
 
@@ -35,6 +64,34 @@ latent)* has **never executed against the live API** — it is *latent*, not
 > (`rest-client.ts` deletion + `queries.*` wiring + ID unification) is done.
 > PASS is the *green light to migrate*, not evidence of a working GraphQL path.
 
+### VERIFIED against ground truth (challenge: "is the REST v1 claim real?") — HOLDS
+
+Re-checked against the actual forked source, not prior notes. The headline
+stands, with evidence:
+
+- **`src/rest-client.ts` EXISTS** in the fork (62 lines, class `GrooveRestClient`,
+  base `https://api.groovehq.com/v1`, `access_token` query param). Fork `src/`
+  is byte-identical to upstream HEAD `1894a1fc` (still current upstream `main`).
+- **Wired call path (index.ts registration → handler → client), all three reads
+  hit REST v1:**
+  - `listConversations`: `index.ts:448` → `ConversationTools.listConversations` → `conversations.ts:92` `this.restClient.listTickets()` **(REST v1)**
+  - `getConversation`: `index.ts:463` → `ConversationTools.getConversation` → `conversations.ts:118` `this.restClient.getTicket()` **(REST v1)**
+  - `listMessages`: `index.ts:526` → `ConversationTools.listMessages` → `conversations.ts:163` `this.restClient.getTicketMessages()` **(REST v1)**
+- **`ConversationTools` is constructed with the GraphQL client but never uses it:**
+  `conversations.ts:38` does `new GrooveRestClient(apiToken)`; `this.client`
+  (the injected `GrooveClient`) is referenced **nowhere** in the file.
+- **`MessageTools.listMessages` (GraphQL, `messages.ts:25`) is dead** — it
+  appears in **no** `index.ts` dispatch case (the `listMessages` case calls
+  `conversationTools`, not `messageTools`). Same for the pre-written
+  `queries.listConversations` / `queries.getConversation`.
+- **Why the doubt arose:** upstream's own `README.md` is out of sync. Its
+  "Project Structure" (README:146-162) lists only `groove-client.ts` and
+  `graphql-queries.ts` and frames the server as "through the Groove GraphQL API
+  v2" (README:3) — it **never lists `rest-client.ts`**, even though the file is
+  in the same commit. The last upstream commit *added* the REST client + wiring
+  but did not update the README. The README describes the intended GraphQL
+  design; the code ships REST v1. **Claim evidenced, not retracted.**
+
 ---
 
 ## CRITICAL — vendor lookup & channel overview (the rewrite depends on these)
@@ -62,12 +119,25 @@ latent)* has **never executed against the live API** — it is *latent*, not
 - **Failure if wrong / absent:** No server-side invoice-number search over conversations; the `searchConversations` tool is not added (or is backed by a top-level search root if one exists). This is a capability discovery, not a regression.
 
 ### A5. `messages(conversationId:)` takes the **same** id `conversations`/`conversation` returns (ID unification — Step 0 question d)
+- **Status: CORROBORATED (not yet fully answerable).** Live `contacts` returned
+  a prefixed real node id `co_7477923393`, confirming Groove node ids are
+  opaque prefixed strings. This strengthens the read that the REST path's faked
+  `cnv_<ticketId>` (`conversations.ts:44`) papers over not having a real node
+  id. The `messages` arg-name/id-equality half stays unanswerable until a
+  help-desk-scoped token exposes `messages`/`conversations`.
 - **File / symbol:** `graphql-queries.ts:196-210` `queries.listMessages` + `messages.ts:25` *(both unused/dead)*; wired path is REST `conversations.ts:160`
 - **Assumes:** root field `messages(conversationId: ID!, first, after)` and that the `ID` equals the `node.id` returned by `conversations`/`conversation`.
 - **Current reality (the break):** the REST path fabricates `id: cnv_<ticketId>` (`conversations.ts:44`) which is **not** a GraphQL node id, then strips `cnv_` again to hit REST (`conversations.ts:162`). GraphQL-id drilling never happens.
 - **Failure if wrong:** If `messages` uses a different arg name, or the conversation id is not accepted by `messages`, conversation→messages drilling stays broken after the rewire. **This is the single most important thing the gate confirms.**
 
 ### A6. Result shape — Cursor Connection vs REST array, and cursor vs `per_page` pagination
+- **Status: CONFIRMED-BY-OBSERVATION (for the account's readable surface).** Live
+  `contacts(first:1)` returned the Cursor Connection shape (`edges { node { id } }`)
+  on the first try. Cursor pagination is confirmed for this account; the
+  `limit → first` port **without** a cursor loop is **definitively wrong**, not
+  merely assumed. (The `conversations`/`messages` connections specifically stay
+  unconfirmed only because those fields aren't token-visible, but Groove's
+  schema is uniformly Cursor-Connection, so the migration must assume connections there too.)
 - **File / symbol (REST-era assumptions, live today):**
   - `rest-client.ts:53-57` `listTickets` — pages with `per_page=${limit}` and returns a bare **array** (`response.tickets`).
   - `rest-client.ts:59-62` `getTicketMessages` — returns a bare **array** (`response.messages`).
