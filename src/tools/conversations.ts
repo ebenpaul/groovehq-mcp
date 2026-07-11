@@ -159,41 +159,66 @@ export class ConversationTools {
     }
 
     const per_page = GROOVE_MAX_PER_PAGE;
-    const tickets: any[] = [];
-    let page = 1;
+    const tickets: any[] = []; // the ONLY source of truth for `returned`
+    let page: number | null = 1;
     let pagesFetched = 0;
     let totalCount = 0;
     let truncated = false;
 
-    // Safety ceiling so a misbehaving pagination cursor can't loop forever.
-    // Computed from Groove's own total_pages after the first page.
-    let hardPageCap = 100_000;
+    // Absolute last-resort guard against a pathological non-advancing cursor.
+    // Termination is driven by real end-of-data signals below, NOT by this.
+    const ABSOLUTE_PAGE_LIMIT = 10_000;
 
-    while (page && pagesFetched < hardPageCap) {
+    while (page != null) {
       const res = await this.restClient.listTicketsPage({ ...filters, page, per_page });
       pagesFetched++;
       totalCount = res.pagination.total_count;
-      hardPageCap = Math.min(hardPageCap, (res.pagination.total_pages || 1) + 2);
-      tickets.push(...res.tickets);
+      tickets.push(...res.tickets); // accumulate actual records — never page*per_page
 
+      // Explicit caller cap on total results.
       if (maxResults && tickets.length >= maxResults) {
-        truncated = totalCount > maxResults;
         tickets.length = maxResults;
+        truncated = totalCount > maxResults;
         break;
       }
-      if (res.tickets.length === 0) break;
-      page = res.pagination.next_page ?? 0;
+
+      // Terminate on ANY authoritative end-of-data signal (do not rely on a ceiling):
+      const { current_page, total_pages, next_page } = res.pagination;
+      if (res.tickets.length === 0) break; // empty page => past the end
+      if (next_page == null) break; // Groove says there is no next page
+      if (total_pages && current_page >= total_pages) break; // reached the last page
+      if (next_page <= page) break; // cursor not advancing => stop, don't spin
+      if (pagesFetched >= ABSOLUTE_PAGE_LIMIT) break; // pathological safety net
+
+      page = next_page;
     }
 
     const conversations = tickets.map((t) => this.convertTicketToConversation(t));
-    const returned = conversations.length;
-    const complete = returned === totalCount && !truncated;
+    const returned = conversations.length; // == actual accumulated record count
 
-    const note = complete
+    // Invariant: we can never have returned more than Groove says exist for this
+    // query. A violation means an accounting bug (e.g. counting pages, not rows)
+    // or a stale total_count — surface it loudly instead of printing nonsense
+    // (e.g. a negative remainder).
+    let inconsistency = '';
+    if (returned > totalCount) {
+      inconsistency =
+        `DATA-INCONSISTENCY: returned ${returned} exceeds Groove total_count ${totalCount}. ` +
+        `This is an accounting bug, not real data. `;
+      // eslint-disable-next-line no-console
+      console.error(`[listConversations] ${inconsistency}filters=${JSON.stringify(filters)}`);
+    }
+
+    const remaining = Math.max(0, totalCount - returned); // never negative
+    const complete = !inconsistency && !truncated && returned === totalCount;
+
+    const note = inconsistency
+      ? `${inconsistency}Returned ${returned}; Groove total_count ${totalCount}.`
+      : complete
       ? `Complete: all ${totalCount} matching conversation(s) returned.`
       : `INCOMPLETE — returned ${returned} of ${totalCount} matching conversation(s)` +
         (truncated ? ` (capped by maxResults=${maxResults}).` : `.`) +
-        ` Do NOT treat this as the full set; ${totalCount - returned} more exist.`;
+        ` Do NOT treat this as the full set; ${remaining} more exist.`;
 
     return {
       pagination: {
