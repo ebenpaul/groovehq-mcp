@@ -1,5 +1,19 @@
 # GraphQL Schema Assumption Inventory (pre-gate)
 
+> **DECISION (2026-07): GraphQL migration CANCELLED — ship on REST v1.** Live
+> introspection proved our token cannot see the v2 conversation surface at all,
+> while `GET /v1/tickets` returns real data (5,946 tickets). REST v1 is the only
+> reachable path to conversation data, so the server ships on it. The inventory
+> below (A1–C3) documents the *unreachable* GraphQL target and remains a record
+> of what a help-desk-scoped token would need; it is **not** a live migration
+> plan. The A2 finding (client-side contact filter → silent under-reporting) was
+> the load-bearing bug and is now **fixed on REST v1**: `listConversations`
+> filters server-side via `customer=` and pages to completion, reporting
+> `total_count`/`complete`/`truncated`. See `README.md`, `src/rest-client.ts`,
+> `src/tools/conversations.ts`, `scripts/smoke-pagination.test.mjs`, and
+> `docs/audit/search-constraint.md`.
+
+
 Baseline: unmodified fork of `christiangenco/groove-mcp` @ upstream HEAD
 `1894a1fc060cac17c75a30ff7949ca4cffe305f5` ("Add channels and REST client
 functionality", 2025-07-01). Fork `src/` is byte-identical to upstream HEAD

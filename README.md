@@ -1,170 +1,148 @@
-# Groove MCP Server
+# Groove MCP Server (read-only, AP research)
 
-A Model Context Protocol (MCP) server for Groove HQ, providing access to customer support ticketing, CRM, and knowledge base functionality through the Groove GraphQL API v2.
+A Model Context Protocol (MCP) server for researching accounts-payable chatter
+in Groove HQ — look up a vendor's conversations, drill into messages, and get
+per-channel context.
+
+## How it works — data sources (important)
+
+This fork does **not** read conversations over GraphQL. Live introspection with
+a real admin token proved the **v2 GraphQL conversation surface is not
+accessible to our token**: there are no `conversations` / `conversation` /
+`messages` root query fields, and the `Conversation` / `Message` /
+`ConversationFilter` types do not exist for this credential. Groove **REST v1**
+(`GET /v1/tickets`) does return real data, so it is the only reachable path to
+conversation data.
+
+| Domain | API used | Notes |
+| --- | --- | --- |
+| Conversations, messages | **Groove REST v1** (`/v1/tickets…`) | Server-side filtered + fully paged. |
+| Contacts | Groove GraphQL v2 (`contacts`) | Reachable for this token. |
+| Agents / channels / KB | Groove GraphQL v2 | May be unavailable depending on token scope; AP-only tokens may not see these. |
+
+The GraphQL conversation/message queries that shipped upstream were **dead
+code** and have been removed (the GraphQL client is retained only for the
+`contacts` path). See `docs/audit/assumption-inventory.md` for the full trail.
+
+Authentication uses an `Authorization: Bearer <token>` header — the token is
+never placed in a URL/query string.
 
 ## Installation
 
-Get your GROOVE_API_TOKEN from https://YOUR_SUBDOMAIN.groovehq.com/settings/developer/api?tat-cursor=1&tat-entityType=accessToken&tat-pageSize=9999
+Get your `GROOVE_API_TOKEN` from
+`https://YOUR_SUBDOMAIN.groovehq.com/settings/developer/api`.
 
-Then add the Groove MCP server to Claude Code:
+Then add the server (local build):
 
 ```bash
-claude mcp add groove-mcp npx groove-mcp -s user --env GROOVE_API_TOKEN=your_groove_api_token_here
+npm install && npm run build
+claude mcp add groove-mcp node ~/path/to/groovehq-mcp/dist/index.js -s user \
+  --env GROOVE_API_TOKEN=your_groove_api_token_here
 ```
 
-You can also optionally set the `GROOVE_API_URL` as an environment variable (defaults to `https://api.groovehq.com/v2/graphql`).
-
-If you'd like to run it locally, clone this repo and then run:
-
-```
-claude mcp add groove-mcp node ~/path/to/groove-mcp/index.js -s user --env GROOVE_API_TOKEN=your_groove_api_token_here
-```
+`GROOVE_API_URL` (GraphQL endpoint, used only for the contacts path) defaults to
+`https://api.groovehq.com/v2/graphql`. The REST v1 base is
+`https://api.groovehq.com/v1`.
 
 ## Available Tools
 
-### Conversation Management
+### Conversations (REST v1)
 
-- **listConversations** - List conversations with optional filters
+- **listConversations** — vendor/account conversation lookup, filtered
+  **server-side** and **paged to completion**. Returns:
 
-  - `status`: Filter by status (unread, opened, closed, snoozed)
-  - `assigneeId`: Filter by assigned agent ID
-  - `contactId`: Filter by contact ID
-  - `tagIds`: Filter by tag IDs
-  - `limit`: Maximum number of conversations to return (default: 20)
+  ```jsonc
+  {
+    "pagination": {
+      "total_count": 102,   // Groove's true total for this query
+      "returned": 102,      // how many are in this response
+      "complete": true,     // returned === total_count (nothing hidden)
+      "truncated": false,   // true only if capped by maxResults
+      "pages_fetched": 3,
+      "per_page": 50,
+      "note": "Complete: all 102 matching conversation(s) returned."
+    },
+    "filtersApplied": { "customer": "artubing@tejastubular.com" },
+    "conversations": [ /* … */ ]
+  }
+  ```
 
-- **getConversation** - Get detailed information about a specific conversation
+  **Always check `pagination.complete` / `total_count`.** If `complete` is
+  `false`, the result is a partial set and must not be treated as exhaustive.
 
-  - `id`: The conversation ID (required)
+  Parameters (each pushed to Groove v1 — no client-side filtering):
 
-- **createConversation** - Create a new conversation
+  - `customer` — vendor email **or** Groove contact id (Groove v1 `customer`). The
+    correct way to get *all* of a vendor's conversations.
+  - `contactId` — back-compat alias for `customer`.
+  - `state` — `unread | opened | closed | snoozed` (v1 `state`).
+  - `assignee` — assignee email/id (v1 `assignee`).
+  - `folder` — folder id (v1 `folder`).
+  - `maxResults` — explicit cap on total results. **Omit to return every match.**
+  - `channelId`, `tagIds` — **not** supported by Groove v1 `/tickets`; if
+    supplied they are **not** applied and are reported under
+    `unsupportedFilters` (never silently approximated).
 
-  - `contactId`: ID of the contact (required)
-  - `subject`: Subject of the conversation (required)
-  - `body`: Initial message body (required)
-  - `assigneeId`: ID of agent to assign to
-  - `tagIds`: Tag IDs to apply
+- **getConversation** — one conversation by **bare** ticket id (`id`, required).
+- **listMessages** — messages for a conversation by **bare** ticket id
+  (`conversationId`, required; optional `limit`).
 
-- **updateConversation** - Update a conversation
+> Write operations (`createConversation`, `updateConversation`,
+> `closeConversation`, `sendMessage`, `createNote`, `createContact`,
+> `updateContact`) are still registered from upstream but are out of scope for
+> this read-only server and should be stripped in a follow-up; several are
+> non-functional against this token.
 
-  - `id`: The conversation ID (required)
-  - `status`: New status (opened, closed, snoozed)
-  - `assigneeId`: ID of agent to assign to
-  - `tagIds`: Tag IDs to apply
-  - `snoozedUntil`: ISO 8601 datetime to snooze until
+### Contacts (GraphQL v2)
 
-- **closeConversation** - Close a conversation
-  - `id`: The conversation ID to close (required)
+- **listContacts** — `search`, `limit`, `after`.
+- **getContact** — `id` (required).
 
-### Message Operations
+### Agents / Knowledge Base (GraphQL v2, scope-dependent)
 
-- **listMessages** - List messages in a conversation
+- **listAgents**, **getAgent**, **getAvailableAgents**, **searchKbArticles** —
+  may return authorization errors on AP-scoped tokens (surface not guaranteed).
 
-  - `conversationId`: The conversation ID to list messages for (required)
-  - `limit`: Maximum number of messages to return (default: 50)
-  - `after`: Cursor for pagination
+## Known constraint — invoice-number search is not yet built
 
-- **sendMessage** - Send a message in a conversation
-
-  - `conversationId`: The conversation ID to send message to (required)
-  - `body`: The message body content (required)
-  - `attachmentIds`: IDs of attachments to include
-
-- **createNote** - Create an internal note in a conversation
-  - `conversationId`: The conversation ID to add note to (required)
-  - `body`: The note content (required)
-
-### Contact Management
-
-- **listContacts** - List contacts with optional search
-
-  - `search`: Search string to filter contacts
-  - `limit`: Maximum number of contacts to return (default: 20)
-  - `after`: Cursor for pagination
-
-- **getContact** - Get detailed information about a specific contact
-
-  - `id`: The contact ID (required)
-
-- **createContact** - Create a new contact
-
-  - `email`: Contact email address (required)
-  - `firstName`: Contact first name
-  - `lastName`: Contact last name
-  - `company`: Contact company
-  - `title`: Contact job title
-  - `phone`: Contact phone number
-
-- **updateContact** - Update contact information
-  - `id`: The contact ID (required)
-  - `email`: Contact email address
-  - `firstName`: Contact first name
-  - `lastName`: Contact last name
-  - `company`: Contact company
-  - `title`: Contact job title
-  - `phone`: Contact phone number
-
-### Agent Operations
-
-- **listAgents** - List all agents in the organization
-
-- **getAgent** - Get detailed information about a specific agent
-
-  - `id`: The agent ID (required)
-
-- **getAvailableAgents** - List all available agents
-
-### Knowledge Base
-
-- **searchKbArticles** - Search knowledge base articles
-  - `query`: Search query (required)
-  - `limit`: Maximum number of articles to return (default: 20)
-
-## Resources
-
-The server exposes Knowledge Base articles as MCP resources. These can be browsed and read by MCP clients.
-
-- **Knowledge Base Articles** - Published KB articles are available as resources
-  - Each article includes metadata like category, views, and helpful votes
-  - Articles are returned in Markdown format when read
+The core AP use case is finding a conversation by invoice number. **Groove v1
+`/tickets` has no keyword/full-text search parameter.** Invoice numbers live in
+ticket *titles* (e.g. `"Invoice 336205 from Tejas Tubular"`), so search must be
+done differently. See `docs/audit/search-constraint.md` for the options
+(scope-by-`customer`-then-match-titles vs. a dedicated Groove search endpoint) —
+**by design this is documented, not implemented**, pending a design decision.
 
 ## Development
 
 ```bash
-# Watch mode for development
-npm run dev
-
-# Run tests
-npm test
-
-# Lint code
-npm run lint
-
-# Type check
-npm run typecheck
+npm run build        # tsc
+npm run typecheck    # tsc --noEmit
+node scripts/smoke-pagination.test.mjs   # e2e pagination smoke test (mocked network)
 ```
 
 ## Project Structure
 
 ```
 ├── src/
-│   ├── index.ts           # Main server entry point
-│   ├── groove-client.ts   # GraphQL client wrapper
-│   ├── tools/             # MCP tool implementations
-│   │   ├── conversations.ts
-│   │   ├── messages.ts
-│   │   ├── contacts.ts
+│   ├── index.ts           # MCP server entry point + tool wiring
+│   ├── rest-client.ts     # Groove REST v1 client (conversations/tickets) — Bearer auth
+│   ├── groove-client.ts   # GraphQL v2 client wrapper (contacts path)
+│   ├── tools/
+│   │   ├── conversations.ts  # REST v1: server-side filter + full pagination
+│   │   ├── messages.ts       # message tools
+│   │   ├── contacts.ts       # GraphQL v2
+│   │   ├── channels.ts
 │   │   └── agents.ts
-│   ├── resources/         # MCP resource implementations
-│   │   └── kb-articles.ts
-│   ├── types/             # TypeScript type definitions
-│   │   └── groove.ts
-│   └── utils/             # Utility functions
-│       └── graphql-queries.ts
-├── tests/                 # Test files
-├── docs/                  # Documentation
-└── dist/                  # Compiled JavaScript files
+│   ├── resources/kb-articles.ts
+│   ├── types/groove.ts
+│   └── utils/graphql-queries.ts  # GraphQL (contacts + legacy write mutations)
+├── scripts/
+│   ├── introspection-gate.sh       # Step 0 schema gate (needs a scoped token)
+│   └── smoke-pagination.test.mjs   # e2e pagination proof
+├── docs/audit/            # assumption inventory, decisions, constraints
+└── dist/                  # compiled output
 ```
 
 ## License
 
-MIT
+MIT (fork of `christiangenco/groove-mcp`).

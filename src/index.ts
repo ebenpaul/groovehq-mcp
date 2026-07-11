@@ -24,7 +24,7 @@ if (!apiToken) {
 }
 
 const grooveClient = new GrooveClient(apiToken, apiUrl);
-const conversationTools = new ConversationTools(grooveClient, apiToken);
+const conversationTools = new ConversationTools(apiToken);
 const messageTools = new MessageTools(grooveClient);
 const contactTools = new ContactTools(grooveClient);
 const agentTools = new AgentTools(grooveClient);
@@ -49,40 +49,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'listConversations',
-        description: 'List conversations with optional filters',
+        description:
+          'List conversations (Groove REST v1 tickets), filtered SERVER-SIDE and paged to completion. ' +
+          'Returns { pagination: { total_count, returned, complete, truncated, note }, conversations, ... }. ' +
+          'ALWAYS check pagination.complete/total_count: if complete is false the result is a partial set and ' +
+          'must not be treated as exhaustive. Omit maxResults to fetch every matching conversation.',
         inputSchema: {
           type: 'object',
           properties: {
-            state: {
+            customer: {
               type: 'string',
-              enum: ['unread', 'opened', 'closed', 'snoozed'],
-              description: 'Filter by conversation state',
-            },
-            assignedAgentId: {
-              type: 'string',
-              description: 'Filter by assigned agent ID',
-            },
-            assignedTeamId: {
-              type: 'string',
-              description: 'Filter by assigned team ID',
+              description:
+                'Vendor/contact email OR Groove contact id. Filters server-side (Groove v1 `customer`). ' +
+                'This is the correct way to get ALL conversations for one vendor.',
             },
             contactId: {
               type: 'string',
-              description: 'Filter by contact ID',
+              description: 'Back-compat alias for `customer` (email or contact id).',
+            },
+            state: {
+              type: 'string',
+              enum: ['unread', 'opened', 'closed', 'snoozed'],
+              description: 'Filter by conversation state (Groove v1 `state`).',
+            },
+            assignee: {
+              type: 'string',
+              description: 'Filter by assignee email/id (Groove v1 `assignee`).',
+            },
+            folder: {
+              type: 'string',
+              description: 'Filter by folder id (Groove v1 `folder`).',
+            },
+            maxResults: {
+              type: 'number',
+              description:
+                'Explicit cap on total conversations returned. Omit to page through and return ALL ' +
+                'matching conversations. When set and more exist, the response is flagged truncated.',
             },
             channelId: {
               type: 'string',
-              description: 'Filter by channel ID',
+              description:
+                'NOT supported server-side by Groove v1 /tickets. If provided it is NOT applied; the ' +
+                'response lists it under unsupportedFilters (results are not scoped to the channel).',
             },
             tagIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Filter by tag IDs',
-            },
-            limit: {
-              type: 'number',
-              description: 'Maximum number of conversations to return',
-              default: 20,
+              description:
+                'NOT supported server-side by Groove v1 /tickets. If provided it is NOT applied and is ' +
+                'reported under unsupportedFilters.',
             },
           },
         },

@@ -1,60 +1,10 @@
-export const CONVERSATION_FIELDS = `
-  id
-  number
-  state
-  subject
-  createdAt
-  updatedAt
-  stateUpdatedAt
-  assigned {
-    agent {
-      id
-      email
-      name
-      firstName
-      lastName
-    }
-    team {
-      id
-      name
-    }
-    at
-  }
-  contact {
-    id
-    email
-    name
-    firstName
-    lastName
-  }
-  counts {
-    messages
-    notes
-    interactions
-    attachments
-    stateChanges
-  }
-  tags {
-    nodes {
-      id
-      name
-    }
-  }
-  snoozed {
-    by {
-      id
-      email
-    }
-    until
-  }
-  starred
-  channel {
-    id
-    name
-    type
-    color
-  }
-`;
+// NOTE: The GraphQL conversation/message READ queries that used to live here
+// (listConversations, getConversation, listMessages, and their CONVERSATION_FIELDS
+// selection set) have been removed. They were dead code: live introspection with
+// a real admin token proved the v2 GraphQL `conversations` / `conversation` /
+// `messages` surface — and the `Conversation`/`Message`/`ConversationFilter`
+// types — are not accessible to this token. Conversation reads run on Groove
+// REST v1 (see src/rest-client.ts and src/tools/conversations.ts).
 
 export const MESSAGE_FIELDS = `
   id
@@ -159,55 +109,9 @@ const KB_CATEGORY_FIELDS = `
 `;
 
 export const queries = {
-  listConversations: `
-    query ListConversations(
-      $first: Int
-      $after: String
-      $filter: ConversationFilter
-      $orderBy: ConversationOrder
-    ) {
-      conversations(
-        first: $first
-        after: $after
-        filter: $filter
-        orderBy: $orderBy
-      ) {
-        edges {
-          node {
-            ${CONVERSATION_FIELDS}
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  `,
-
-  getConversation: `
-    query GetConversation($id: ID!) {
-      conversation(id: $id) {
-        ${CONVERSATION_FIELDS}
-      }
-    }
-  `,
-
-  listMessages: `
-    query ListMessages($conversationId: ID!, $first: Int, $after: String) {
-      messages(conversationId: $conversationId, first: $first, after: $after) {
-        edges {
-          node {
-            ${MESSAGE_FIELDS}
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  `,
+  // listConversations / getConversation / listMessages removed — the v2 GraphQL
+  // conversation surface is not accessible to this token. Conversation reads use
+  // Groove REST v1 (src/tools/conversations.ts).
 
   listContacts: `
     query ListContacts($first: Int, $after: String, $search: String) {

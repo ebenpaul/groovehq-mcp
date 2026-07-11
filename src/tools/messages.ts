@@ -1,12 +1,6 @@
 import { GrooveClient } from '../groove-client.js';
-import { queries, mutations } from '../utils/graphql-queries.js';
+import { mutations } from '../utils/graphql-queries.js';
 import { Message } from '../types/groove.js';
-
-interface ListMessagesArgs {
-  conversationId: string;
-  limit?: number;
-  after?: string;
-}
 
 interface SendMessageArgs {
   conversationId: string;
@@ -22,25 +16,9 @@ interface CreateNoteArgs {
 export class MessageTools {
   constructor(private client: GrooveClient) {}
 
-  async listMessages(args: ListMessagesArgs): Promise<Message[]> {
-    const variables = {
-      conversationId: args.conversationId,
-      first: args.limit || 50,
-      after: args.after,
-    };
-
-    const response = await this.client.request<{
-      messages: {
-        edges: Array<{ node: Message }>;
-        pageInfo: {
-          hasNextPage: boolean;
-          endCursor: string;
-        };
-      };
-    }>(queries.listMessages, variables);
-
-    return response.messages.edges.map(edge => edge.node);
-  }
+  // NOTE: a GraphQL `listMessages` used to live here but was dead code — the
+  // wired listMessages tool uses ConversationTools.listMessages (REST v1),
+  // and the v2 GraphQL `messages` field is not accessible to this token.
 
   async sendMessage(args: SendMessageArgs): Promise<Message> {
     const input = {
