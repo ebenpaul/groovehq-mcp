@@ -11,9 +11,32 @@ export interface GroovePagination {
   current_page: number;
   total_pages: number;
   total_count: number;
-  next_page: number | null;
-  previous_page: number | null;
+  // Groove returns next_page as an ABSOLUTE URL STRING (e.g.
+  // "https://api.groovehq.com/v1/tickets?customer=...&page=3"), and null ONLY on
+  // the final page. Treat it as opaque: null means done. Never compare it to an
+  // integer — parse the `page` query param with parseGroovePageParam() instead.
+  next_page: string | number | null;
+  previous_page: string | number | null;
   per_page?: number;
+}
+
+/**
+ * Extract the numeric `page` from a Groove next_page value. Accepts an absolute
+ * URL string, returns its `page` query param as a number; accepts a bare number;
+ * returns null when it can't parse one (caller should fall back to current+1).
+ */
+export function parseGroovePageParam(nextPage: string | number | null | undefined): number | null {
+  if (nextPage == null) return null;
+  if (typeof nextPage === 'number') return Number.isFinite(nextPage) ? nextPage : null;
+  // Try a real URL parse first, then a permissive regex fallback.
+  try {
+    const p = new URL(nextPage).searchParams.get('page');
+    if (p != null && /^\d+$/.test(p)) return parseInt(p, 10);
+  } catch {
+    // not an absolute URL — fall through to regex
+  }
+  const m = nextPage.match(/[?&]page=(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 export interface TicketsPage {

@@ -1,4 +1,9 @@
-import { GrooveRestClient, ListTicketsParams, GROOVE_MAX_PER_PAGE } from '../rest-client.js';
+import {
+  GrooveRestClient,
+  ListTicketsParams,
+  GROOVE_MAX_PER_PAGE,
+  parseGroovePageParam,
+} from '../rest-client.js';
 import { Conversation } from '../types/groove.js';
 
 interface ListConversationsArgs {
@@ -160,7 +165,7 @@ export class ConversationTools {
 
     const per_page = GROOVE_MAX_PER_PAGE;
     const tickets: any[] = []; // the ONLY source of truth for `returned`
-    let page: number | null = 1;
+    let page = 1;
     let pagesFetched = 0;
     let totalCount = 0;
     let truncated = false;
@@ -169,7 +174,7 @@ export class ConversationTools {
     // Termination is driven by real end-of-data signals below, NOT by this.
     const ABSOLUTE_PAGE_LIMIT = 10_000;
 
-    while (page != null) {
+    while (true) {
       const res = await this.restClient.listTicketsPage({ ...filters, page, per_page });
       pagesFetched++;
       totalCount = res.pagination.total_count;
@@ -182,15 +187,22 @@ export class ConversationTools {
         break;
       }
 
-      // Terminate on ANY authoritative end-of-data signal (do not rely on a ceiling):
       const { current_page, total_pages, next_page } = res.pagination;
-      if (res.tickets.length === 0) break; // empty page => past the end
-      if (next_page == null) break; // Groove says there is no next page
-      if (total_pages && current_page >= total_pages) break; // reached the last page
-      if (next_page <= page) break; // cursor not advancing => stop, don't spin
-      if (pagesFetched >= ABSOLUTE_PAGE_LIMIT) break; // pathological safety net
 
-      page = next_page;
+      // Terminate on ANY authoritative end-of-data signal (do not rely on a ceiling):
+      if (res.tickets.length === 0) break; // empty page => past the end
+      if (next_page == null) break; // Groove: next_page is null ONLY on the last page
+      if (total_pages && current_page >= total_pages) break; // belt & braces: reached last page
+
+      // Advance. next_page is an opaque URL STRING — parse its `page` param and
+      // require it to move forward; fall back to sequential current_page + 1.
+      // NEVER compare the raw next_page string to an integer.
+      const parsed = parseGroovePageParam(next_page);
+      const advanceTo = parsed != null && parsed > page ? parsed : current_page + 1;
+      if (advanceTo <= page) break; // cannot advance => stop rather than spin
+      page = advanceTo;
+
+      if (pagesFetched >= ABSOLUTE_PAGE_LIMIT) break; // pathological safety net
     }
 
     const conversations = tickets.map((t) => this.convertTicketToConversation(t));

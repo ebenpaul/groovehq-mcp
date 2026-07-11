@@ -59,19 +59,25 @@ globalThis.fetch = async (url, options = {}) => {
     const slice = dataset.slice(start, start + perPage);
     slice.forEach((t) => servedIds.add(t.id));
 
+    // next_page is Groove's REAL shape: an ABSOLUTE URL string with a
+    // percent-encoded customer and a `page=` param, and null ONLY on the final
+    // page. (The prior mock returned a bare number and hid the URL-parsing bug.)
+    const nextUrl = (n) =>
+      `https://api.groovehq.com/v1/tickets?customer=${encodeURIComponent(customer)}&page=${n}&per_page=${perPage}`;
+
     // Pagination metadata policy:
     //  - TEJAS  = truthful Groove (total_pages=3, next_page null at page 3).
-    //  - QUIRKY = adversarial: reports total_pages=5 and keeps next_page
-    //             non-null through empty trailing pages 4-5. A correct loop must
-    //             still stop (empty page) and must not let empties inflate counts.
+    //  - QUIRKY = adversarial: reports total_pages=5 and keeps next_page a
+    //             non-null URL through empty trailing pages 4-5. A correct loop
+    //             must still stop (empty page) and must not inflate counts.
     const truthfulPages = Math.max(1, Math.ceil(total / perPage));
     let total_pages, next_page;
     if (customer === QUIRKY) {
       total_pages = 5;
-      next_page = page < 5 ? page + 1 : null;
+      next_page = page < 5 ? nextUrl(page + 1) : null;
     } else {
       total_pages = truthfulPages;
-      next_page = page < truthfulPages ? page + 1 : null;
+      next_page = page < truthfulPages ? nextUrl(page + 1) : null;
     }
 
     return jsonResponse({
@@ -133,9 +139,12 @@ check('total_count === 102', () => assert.strictEqual(full.pagination.total_coun
 check('complete === true', () => assert.strictEqual(full.pagination.complete, true));
 check('truncated === false', () => assert.strictEqual(full.pagination.truncated, false));
 check('pages_fetched === 3', () => assert.strictEqual(full.pagination.pages_fetched, 3));
+const ids = new Set(full.conversations.map((c) => c.id));
+check('partial final page (n=2) fetched AND counted — tejas_101 & tejas_102 present', () =>
+  assert.ok(ids.has('tejas_101') && ids.has('tejas_102')));
 
 console.log('\n== 2. Loop STOPS at end of data — zero requests for page 4+ ==');
-check('exactly pages 1,2,3 requested', () =>
+check('exactly pages 1,2,3 requested (page 3 reached via URL-string next_page)', () =>
   assert.deepStrictEqual(tejasReqs.map((r) => r.page), [1, 2, 3]));
 check('NO request for page >= 4', () =>
   assert.strictEqual(tejasReqs.filter((r) => r.page >= 4).length, 0));
